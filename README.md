@@ -1,32 +1,59 @@
-AdaptiveHybridAttention (AHA)
 
-**Scaling Attention Scores**
+### Adaptive Span Attention and Span Predictor
 
-To further enhance focus within the reduced attention window, we scale the attention scores themselves. This amplifies the importance of the remaining tokens.  Imagine it like zooming in on a map – not only do you see a smaller area, but the details within that area also become larger and clearer.
+**Role of SpanPredictor:**
+- The SpanPredictor uses the global attention output to guide the local attention mechanism.
+- The scale value (between 0 and 1) produced by the SpanPredictor directly influences the local attention window size.
 
-**Sharpening Attention**
+**Effect of Small Scale Values:**
+- A smaller scale reduces the local attention window size.
+- This means local attention will focus on fewer tokens, informed by the global context.
 
-We introduce a "temperature" parameter in the attention mechanism's softmax function. Lowering this temperature sharpens the attention distribution, making the model even more selective about which tokens it focuses on. Think of it like adjusting the contrast on a photo – the important elements stand out more, while less relevant details fade into the background.
+**Why Reduce the Local Attention Window?**
+- **Focus on Key Information:** Helps concentrate computational resources on crucial regions identified by the global attention.
+- **Reduce Noise:** Limits attention to a smaller context, filtering out irrelevant tokens.
+- **Computational Efficiency:** Smaller windows require fewer computations, optimizing resources for long sequences.
 
-**Interaction with `max_rel_dist`**
+**Analogy:**
+- Global attention is like understanding the theme of a sentence.
+- Local attention focuses on individual words and immediate neighbors, guided by the global context.
 
-The `max_rel_dist` parameter controls how far apart tokens can be to still influence each other. It's crucial to ensure this parameter doesn't clash with our dynamically adjusted window size. We do this by carefully constraining `max_rel_dist` so it never exceeds the current window size. This prevents the model from trying to "look" beyond the boundaries of the focused region.
+### Enhancements: Scaling and Sharpening Attention
 
-**Important Considerations**
+1. **Scaling Attention Scores:**
+   - Dynamically scale attention scores inversely with span_scale:
+     ```python
+     attn_weights = attn_weights * (1.0 / span_scale)
+     attn_output = torch.bmm(attn_weights, value_span)
+     ```
 
-*   **Over-sharpening:** Be careful not to make the attention too sharp. This can prevent the model from capturing subtle relationships between tokens. It's like focusing a microscope too closely – you might miss the bigger picture.
-*   **Alternative Scaling:** We can explore different ways to scale the attention scores, such as using a logarithmic function, to fine-tune the level of focus.
-*   **Evaluation:** Rigorous evaluation is essential to understand the impact of these techniques on your specific task. Visualizing attention weights and tracking performance metrics will help you find the optimal balance.
+2. **Sharpening Attention:**
+   - Apply temperature scaling to soften or sharpen attention distribution:
+     ```python
+     attn_weights = torch.softmax(attn_scores / temperature, dim=-1)
+     ```
+   - Dynamic temperature adjustment based on span_scale:
+     ```python
+     temperature = 1.0 - span_scale  # Lower temperature sharpens attention
+     ```
 
-**Key Changes and Explanations**
+### Key Considerations
 
-*   **Integrated Scaling and Sharpening:** We've seamlessly combined temperature scaling and attention weight scaling within the `AdaptiveSpanAttention` module for maximum impact.
-*   **Safe Span Calculation:** We've added safeguards to ensure the effective span doesn't exceed the input size or `max_rel_dist`, preventing errors and respecting positional biases.
-*   **Global Attention Correction:** We've removed unnecessary arguments from the global attention call to ensure correct operation.
-*   **Minimum Window Size:** We enforce a minimum window size to avoid zero-length windows that would cause errors.
-*   **Dynamic `max_rel_dist`:** We dynamically adjust `max_rel_dist` to prevent conflicts with the changing window size.
-*   **Sliding Window Fix:** We've corrected the sliding window implementation to handle windowed outputs properly and incorporate the dynamic span scale.
+- **Over-Sharpening:** Be cautious of too sharp attention distributions.
+- **Effective Span Calculation:** Ensure effective_span respects the input tensor's lengths and max_rel_dist to avoid out-of-bounds errors.
+- **Evaluation:** Continuously assess changes through visualizing attention weights, tracking WER, and other relevant metrics.
 
-**Potential Refinements**
+### Max_rel_dist and Positional Bias
 
-For improved clarity, we can explicitly set `max_rel_dist` within the `AdaptiveSpanAttention` module to highlight its role in the dynamic scaling process.
+- **Interaction with max_rel_dist:** Ensure max_rel_dist does not exceed the dynamically adjusted span_length.
+  ```python
+  effective_span = min(span_length, self.max_rel_dist)
+  ```
+
+### Potential Refinements
+
+- **Explicit Max_rel_dist Setting:** Set max_rel_dist within the `AdaptiveSpanAttention.forward` method for clarity.
+
+### Conclusion
+
+By integrating these scaling and sharpening techniques, you enhance the local attention mechanism dynamically based on global context, making the model more focused and efficient. Extensive experimentation will be crucial to fine-tune these parameters for optimal performance.
