@@ -39,14 +39,19 @@
 ##
 Scaling Attention Scores:
 Scale up the attention scores within the local attention mechanism inversely with the span_scale to increase focus on the remaining tokens within the smaller window.
+
 Sharpening Attention:
 Increase the contrast between high and low attention scores by applying a sharpening function or using temperature scaling in the softmax function.
+
 Temperature Scaling:
 Introduce a temperature parameter in the softmax function, where lower values result in sharper attention.
+
 Dynamic Temperature:
 Make the temperature adjust dynamically based on the span_scale, decreasing as the scale decreases to sharpen attention.
+
 Interaction with max_rel_dist:
 Ensure that max_rel_dist does not exceed the dynamically adjusted span_length to prevent out-of-bounds errors and ensure correct application of relative positional biases.
+
 ##
 ### Key Considerations
 
