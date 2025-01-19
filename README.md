@@ -73,3 +73,117 @@ Ensure that max_rel_dist does not exceed the dynamically adjusted span_length to
 ### Conclusion
 
 By integrating these scaling and sharpening techniques, you enhance the local attention mechanism dynamically based on global context, making the model more focused and efficient. Extensive experimentation will be crucial to fine-tune these parameters for optimal performance.
+
+  ```python
+
+class AdaptiveSpanAttention(nn.Module):
+    def __init__(self, base, n_state, n_head, max_rel_dist, window_size, max_span, checkpointing=False, temperature_scale_factor=0.1):
+        super().__init__()
+        self.base = base
+        self.n_state = n_state
+        self.n_head = n_head
+        self.max_rel_dist = max_rel_dist
+        self.window_size = window_size
+        self.max_span = max_span
+        self.checkpointing = checkpointing
+        self.temperature_scale_factor = temperature_scale_factor
+        self.multihead_attn = MultiheadAttention(self.base, self.n_state, self.n_head, self.max_rel_dist, self.checkpointing)
+        self.span_scale = nn.Parameter(torch.tensor(1.0))
+        
+    def forward(self, query, key, value, span_scale):
+        span_length = int(self.max_span * span_scale.mean().item())
+        span_length = min(span_length, query.shape[1], key.shape[1], value.shape[1])
+
+        effective_span = min(span_length, self.max_rel_dist)
+        query_span = query[:, :effective_span, :]
+        key_span = key[:, :effective_span, :]
+        value_span = value[:, :effective_span, :]
+
+        attn_output, attn_weights = self.multihead_attn(query_span, key_span, value_span)
+        temperature = 1.0 - self.temperature_scale_factor * span_scale  
+
+        n_batch, n_ctx, n_state = query_span.shape
+        scale = (n_state // self.multihead_attn.n_head) ** -0.25
+
+        q = query_span.view(*query_span.shape[:2], self.multihead_attn.n_head, -1).permute(0, 2, 1, 3)
+        k = key_span.view(*key_span.shape[:2], self.multihead_attn.n_head, -1).permute(0, 2, 1, 3)
+        v = value_span.view(*value_span.shape[:2], self.multihead_attn.n_head, -1).permute(0, 2, 1, 3)
+
+        attn_scores = torch.matmul(q, k.transpose(-2, -1))
+        attn_weights = torch.softmax((attn_scores / temperature) * scale, dim=-1)
+        attn_output = torch.matmul(attn_weights, v)
+        attn_output = attn_output.permute(0, 2, 1, 3).flatten(start_dim=2)
+        attn_weights = attn_weights * (1.0 / span_scale)     
+       
+        attn_output = torch.bmm(attn_weights.view(-1, *attn_weights.shape[2:]), v.view(-1, *v.shape[2:]))
+        attn_output = attn_output.view(query.size(0), query.size(1), -1)
+        attn_output = attn_output.permute(0, 2, 1).contiguous().view(query.size(0), -1, query.size(2))    
+        return attn_output, attn_weights
+
+class SpanPredictor(nn.Module):
+    def __init__(self, n_state):
+        super().__init__()
+        self.linear = nn.Linear(n_state, 1)
+
+    def forward(self, global_attention_output):
+        scale = torch.sigmoid(self.linear(global_attention_output))
+        return scale
+
+class HybridAttention(nn.Module):
+    def __init__(self, base, n_state, n_head, max_rel_dist, window_size, max_span=128, sliding_window=16):
+        super().__init__()
+        self.sliding_window = sliding_window
+        self.base = base
+        self.n_state = n_state
+        self.n_head = n_head
+        self.max_rel_dist = max_rel_dist
+        self.window_size = window_size
+        self.max_span = max_span
+        self.sliding_window = sliding_window
+        self.span_predictor = SpanPredictor(n_state)
+        self.local_max_rel_dist = max_rel_dist  
+        self.global_max_rel_dist = max_rel_dist
+        self.local_attn = AdaptiveSpanAttention(self.base, self.n_state, self.n_head, self.local_max_rel_dist, self.window_size, self.max_span)
+        self.global_attn = MultiheadAttention(self.base, self.n_state, self.n_head, self.global_max_rel_dist, checkpointing=False)
+        self.ln_local = nn.LayerNorm(self.n_state)
+        self.ln_global = nn.LayerNorm(self.n_state)
+        self.projection = nn.Linear(2 * self.n_state, self.n_state)
+
+    def forward(self, x, loss=None): 
+ 
+        x_local = self.ln_local(x)
+        x_global = self.ln_global(x)
+
+        global_out, _ = self.global_attn(x_global, x_global, x_global)
+        span_scale = self.span_predictor(global_out.mean(dim=1)) 
+
+        window_size = max(1, int(self.sliding_window * span_scale.mean().item()))
+        span_length = max(1, int(self.max_span * span_scale.mean().item()))
+
+        effective_max_rel_dist = min(self.max_rel_dist, x_local.size(1))
+        local_effective_max_rel_dist = min(self.local_max_rel_dist, span_length, window_size)
+        global_effective_max_rel_dist = effective_max_rel_dist
+        self.local_attn.max_rel_dist = local_effective_max_rel_dist
+        self.global_attn.max_rel_dist = global_effective_max_rel_dist
+
+        local_out = self.sliding_window_attention(x_local, window_size, span_length, span_scale)
+        combined = torch.cat([local_out.permute(1, 0, 2), global_out.permute(1, 0, 2)], dim=-1)
+        combined_out = self.projection(combined)
+        return combined_out
+
+    def sliding_window_attention(self, x, window_size, span_length, span_scale):
+        batch_size, seq_len, n_state = x.size()
+        output = torch.zeros_like(x, device=x.device)
+
+        for i in range(0, seq_len, window_size):
+            end = min(i + window_size, seq_len)
+            query = x[:, i:end, :]
+            start = max(0, i - span_length + window_size)
+            key = x[:, start:i + span_length, :]
+            value = x[:, start:i + span_length, :]
+
+            attn_output, _ = self.local_attn(query, key, value, span_scale)
+            output[:, i:end, :] = attn_output
+        return output
+ ```
+
