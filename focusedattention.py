@@ -1,5 +1,6 @@
 ## Focused attention -- These blocks respond to relative positional bias in real-time during training. 
-## The bias in turn is based on loss updates through the model via max_dist and base (frequency). You will see these updates print to screen during training.
+## The bias in turn is based on loss updates through the model via max_dist and base (frequency). You will see these updates print to screen during training. 
+## You can substiute other types of attention for both local, global, anf the multihead within local if your local attention has a multihead.
 ## Goes with Echo
 
 class AdaptiveSpanAttention(nn.Module):
