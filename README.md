@@ -77,10 +77,11 @@ By integrating these scaling and sharpening techniques, you enhance the local at
   ```python
 
 ## Focused attention -- These blocks respond to relative positional bias in real-time during training. 
-## The bias in turn is based on loss updates through the model via max_dist and base (frequency). You will
-## see bias (and base) updates print to screen during training as they occure "naturally". Bias informs global attention
-## which informs local attention and "focus". You can substiute other types of attention for both local,
-## global, and the multihead within local if your local attention uses a multihead.
+## The bias in turn is based on loss updates through the model via max_dist and base (frequency) which are both dynamically
+## adjusted during training via loss. You will see bias (and base) updates print to screen during training as they
+## occure "naturally". Bias informs global attention which informs local attention and "focus".
+## You can substiute other types of attention for both local and global.
+## All of this occures internally and isn't connected to a training loop.
 
 class AdaptiveSpanAttention(nn.Module):
     def __init__(self, base, n_state, n_head, max_dist, win_size, max_span, temp_scale=0.01):
