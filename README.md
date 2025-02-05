@@ -1,7 +1,13 @@
-## How it Works and Why it's a Good Idea:
+### What is it:
 
-### An approach to building an attention mechanism that can adapt its focus based on the input sequence. It combines the strengths of local and global attention while incorporating mechanisms for efficiency and dynamic adaptation. Addresses a common challenge in sequence modeling, i.e., balancing local and global dependencies. 
+An approach to building an attention mechanism that can adapt its focus based on the input sequence. It combines the strengths of local and global attention while incorporating mechanisms for efficiency and dynamic adaptation. 
 
+
+### Why it's a good idea: 
+Addresses a common challenge in sequence modeling, i.e., balancing local and global dependencies. 
+
+
+### How it works:
 Global Context for Span Prediction: The HybridAttention first performs global attention over the entire sequence. The output of this global attention is then used to predict the span_scale. This is a smart design because the global context likely contains valuable information for determining the appropriate attention span for each part of the sequence.
 
 Adaptive Local Attention: The predicted span_scale is used to control the effective window size for the local attention. This allows the model to:
@@ -11,6 +17,7 @@ Focus on a smaller window when the span_scale is low (indicating that local info
 Efficiency: The sliding window approach in slid_wiattention breaks down the computation of local attention into smaller, more manageable chunks. This is important for long sequences, as it helps to reduce the computational cost and memory footprint.
 
 Balance: By combining local and global attention, the model can capture both short-range and long-range dependencies in the input sequence. The adaptive span mechanism allows it to do so efficiently, dynamically adjusting the focus as needed.
+
 
 
 
