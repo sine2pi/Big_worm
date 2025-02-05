@@ -62,10 +62,10 @@ Balance: By combining local and global attention, the model can capture both sho
               super().__init__()
               self.linear = nn.Linear(dims, 1)
    
-       def forward(self, global_out):
-           scale = torch.sigmoid(self.linear(global_out))
-           return scale
-       
+          def forward(self, global_out):
+               scale = torch.sigmoid(self.linear(global_out))
+               return scale
+                 
      class HybridAttention(nn.Module):
           def __init__(self, base, dims, head, max_dist, win_size = 32, max_span = 32, slid_win = 32):
               super().__init__()
