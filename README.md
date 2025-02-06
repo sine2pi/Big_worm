@@ -31,8 +31,10 @@ Reasoning: you might want a different temperature scaling approach that is learn
 5. Sparsity Inducement
    
 Scenario: If the model were to be deployed on low power devices.
+
 Reasoning: You want to create as sparse of a weight distribution as possible, and this is done by a lower temperature.
 
+### Keep in mind there are reasonings behind why one might want the opposite to be true when it comes to focus.. that can be changed with a toggle.
 
 
 
