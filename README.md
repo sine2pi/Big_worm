@@ -34,7 +34,7 @@ Scenario: If the model were to be deployed on low power devices.
 
 Reasoning: You want to create as sparse of a weight distribution as possible, and this is done by a lower temperature.
 
-### Keep in mind there are reasonings behind why one might want the opposite to be true when it comes to focus and that can be changed with a toggle sharpen_longer=False in your model config.
+#### There are reasonings behind why one might want the opposite to be true when it comes to focus and that can be changed with a toggle sharpen_longer=False in your model config.
       
       class AdaptiveSpanAttention(nn.Module):
           def __init__(self, base, dims, head, max_dist, win_size, max_span, temp_scale=0.01, sharpen_longer=False):  
