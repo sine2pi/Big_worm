@@ -1,4 +1,4 @@
-
+#before final
 class AdaptiveSpanAttention(nn.Module):
     def __init__(self, base, dims, head, max_dist, win_size, max_span, temp_scale=0.01):
         super().__init__()
@@ -11,36 +11,52 @@ class AdaptiveSpanAttention(nn.Module):
         self.span_scale = nn.Parameter(torch.tensor(1.0))
 
     def forward(self, query, key, value, span_scale):
+        # print("AdaptiveSpanAttention - Input query, key, value shapes:", query.shape, key.shape, value.shape)
+        # print("AdaptiveSpanAttention - span_scale:", span_scale)
+
         span_len = int(self.max_span * span_scale.mean().item())
         span_len = min(span_len, query.shape[1], key.shape[1], value.shape[1])
+        # print("AdaptiveSpanAttention - span_len:", span_len)
+
         eff_span = min(span_len, self.max_dist)
+        # print("AdaptiveSpanAttention - eff_span:", eff_span)
 
         q_span = query[:, :eff_span, :]
         k_span = key[:, :eff_span, :]
         v_span = value[:, :eff_span, :]
+        # print("AdaptiveSpanAttention - q_span, k_span, v_span shapes:", q_span.shape, k_span.shape, v_span.shape)
 
         attn_out, attn_weights = self.multihead_attn(q_span, k_span, v_span)
+        # print("AdaptiveSpanAttention - attn_out shape after multihead_attn:", attn_out.shape)
 
-        # FINAL CORRECTED TEMPERATURE SCALING:
-        temperature = 0.5 + self.temp_scale * span_scale.mean().item()
+        # CORRECTED TEMPERATURE SCALING:
+        temperature = 1.0 + self.temp_scale * (1.0 - span_scale.mean().item())
+        # print("AdaptiveSpanAttention - temperature:", temperature)
 
-        batch_size, _, dims = query.shape
+        batch_size, _, dims = query.shape  # Use original query shape
         scale = (dims // self.multihead_attn.head) ** -0.25
 
         q = q_span.view(q_span.shape[0], q_span.shape[1], self.multihead_attn.head, -1).permute(0, 2, 1, 3)
         k = k_span.view(k_span.shape[0], k_span.shape[1], self.multihead_attn.head, -1).permute(0, 2, 1, 3)
         v = v_span.view(v_span.shape[0], v_span.shape[1], self.multihead_attn.head, -1).permute(0, 2, 1, 3)
+        # print("AdaptiveSpanAttention - q, k, v shapes after view/permute:", q.shape, k.shape, v.shape)
 
         attn_scores = torch.matmul(q, k.transpose(-2, -1))
+        # print("AdaptiveSpanAttention - attn_scores shape:", attn_scores.shape)
         attn_weights = torch.softmax((attn_scores / temperature) * scale, dim=-1)
+        # print("AdaptiveSpanAttention - attn_weights shape after softmax:", attn_weights.shape)
         attn_out = torch.matmul(attn_weights, v)
+        # print("AdaptiveSpanAttention - attn_out shape after matmul:", attn_out.shape)
         attn_out = attn_out.permute(0, 2, 1, 3).flatten(start_dim=2)
+        # print("AdaptiveSpanAttention - attn_out shape after permute/flatten:", attn_out.shape)
+
 
         # Corrected final reshaping:
-        attn_out = attn_out.contiguous().view(batch_size, eff_span, dims)
+        attn_out = attn_out.permute(0, 2, 1).contiguous().view(batch_size, eff_span, dims)
+        # print("AdaptiveSpanAttention - Final attn_out shape:", attn_out.shape)
 
         return attn_out, attn_weights
-
+        
 class SpanPredictor(nn.Module):
     def __init__(self, dims):
         super().__init__()
