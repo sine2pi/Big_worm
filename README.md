@@ -1,3 +1,29 @@
+#### Why?:
+
+1. Long-Range Dependencies and Specificity:
+Scenario: Imagine a task involving long documents where you need to identify very specific pieces of information scattered throughout the text. For instance, answering questions about a legal document or summarizing a complex scientific paper.
+Reasoning: When the attention span is long, you're allowing the model to consider a wide range of context. In this case, you might actually want the attention to be sharper. You don't want the model to be wishy-washy and distribute its attention equally across a large number of tokens. You want it to pinpoint the few most relevant pieces of information within that broad context. A softer attention (higher temperature) over a long span would likely lead to a diluted, less informative representation.
+Example: If the question is "What is the defendant's age in Case 3.14159?", and Case 3.14159 spans several paragraphs, you'd want the model to sharply focus on the specific sentence mentioning the age, even within that large span.
+
+2. Avoiding "Attention Collapse" with Long Spans:
+Scenario: With very long spans, standard (or softly scaled) attention can sometimes suffer from a phenomenon where the attention weights become too uniform. The model essentially "gives up" on trying to discriminate between tokens and attends to everything equally.
+Reasoning: A sharper softmax (lower temperature) can act as a regularizer, preventing this "attention collapse." It forces the model to make more decisive choices, even when the context is large.
+Analogy: Think of it like searching a large library. If you have no idea where to look (soft attention), you might just wander aimlessly. A sharper focus (even if you don't know exactly where to go) forces you to pick specific shelves and sections to examine, increasing your chances of finding what you need.
+
+3. Tasks Requiring Precise Identification within Broad Context:
+Scenario: Tasks like named entity recognition (NER) or relation extraction, when applied to long documents.
+Reasoning: You might need a broad context (long span) to understand the relationships between entities, but you still need to precisely identify the entities themselves (which might be short phrases). Softer attention over a long span might blur the boundaries of the entities, making it harder to extract them accurately.
+
+4. Hierarchical Reasoning:
+Scenario: Imagine a multi-step reasoning task, where the model needs to first identify relevant sections of a document (long span, sharper attention) and then analyze those sections in more detail (shorter spans, possibly softer attention).
+Reasoning: you might want a different temperature scaling approach that is learnable.
+
+5. Sparsity Inducement
+Scenario: If the model were to be deployed on low power devices.
+Reasoning: You want to create as sparse of a weight distribution as possible, and this is done by a lower temperature.
+
+
+
 
       class AdaptiveSpanAttention(nn.Module):
           def __init__(self, base, dims, head, max_dist, win_size, max_span, temp_scale=0.01):
