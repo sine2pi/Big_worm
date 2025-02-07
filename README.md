@@ -8,7 +8,7 @@
 <img width="200" alt="legend" src="https://github.com/user-attachments/assets/bb05d941-7e28-48f1-a507-bd8773bf7aa4" />
 
 
-Pilot run. A sanity check to see if the models could learn. Attention heads on Echo 8 Whisper 16. Note the runtime changes with the focused attention hybrid.
+Pilot run. A sanity check to see if the models could learn. Attention heads on Echo 8 Whisper 16. Note the runtime change with the focused attention hybrid.
 
 
 
