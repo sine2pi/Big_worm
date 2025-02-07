@@ -1,4 +1,17 @@
-#### Why?:
+
+<img width="925" alt="eval" src="https://github.com/user-attachments/assets/395fafa4-d505-45bc-b4fa-d650c96ee7ed" />
+
+<img width="925" alt="train" src="https://github.com/user-attachments/assets/955c0cb8-4022-4ee0-9ffa-887e50278d1e" />
+
+
+
+<img width="200" alt="legend" src="https://github.com/user-attachments/assets/bb05d941-7e28-48f1-a507-bd8773bf7aa4" />
+
+
+Pilot run. A sanity check to see if the models could learn. Attention heads on Echo 8 Whisper 16. Note the runtime changes with the focused attention hybrid.
+
+
+
 
 1. Long-Range Dependencies and Specificity:
 
