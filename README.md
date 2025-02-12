@@ -143,3 +143,32 @@ Reasoning: You want to create as sparse of a weight distribution as possible, an
               attn_out = attn_out.permute(0, 2, 1, 3).contiguous().view(batch_size, seq_len, -1)
       
               return attn_out, attn_weights
+
+
+              
+
+###Batch: 
+
+    def _window(self, x, win_size, span_len, span_scale):
+        batch_size, seq_len, dims = x.size()
+        num_windows = (seq_len + win_size - 1) // win_size  # Calculate the number of windows
+    
+        # Create tensors to store the outputs
+        output = torch.zeros_like(x, device=x.device)
+    
+        # Iterate over the windows in a more efficient manner
+        for i in range(num_windows):
+            start_idx = i * win_size
+            end_idx = min((i + 1) * win_size, seq_len)
+            query = x[:, start_idx:end_idx, :]
+    
+            # Define the range of keys and values
+            key_start = max(0, start_idx - span_len + win_size)
+            key_end = min(start_idx + span_len, seq_len)
+            key = x[:, key_start:key_end, :]
+            value = x[:, key_start:key_end, :]
+    
+            attn_out, _ = self._focus(query, key, value, span_scale)
+            output[:, start_idx:end_idx, :] = attn_out
+    
+        return output
