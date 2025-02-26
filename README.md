@@ -33,7 +33,7 @@ class Predictor(nn.Module):
 class AdaptiveSpan(nn.Module):
     def __init__(self, dims, heads, max_dist, sharpen, temp_scale=0.01):
         super().__init__()
-        self.head = heads
+        self.heads = heads
         self.max_dist = max_dist
         self.dims = dims
         self.temp_scale = temp_scale
@@ -51,11 +51,11 @@ class AdaptiveSpan(nn.Module):
         v_span = value[:, :eff_span, :]
             
         batch_size, _, dims = query.shape
-        scale = (dims // self.head) ** -0.25
+        scale = (dims // self.heads) ** -0.25
       
-        q = q_span.view(q_span.shape[0], q_span.shape[1], self.head, -1).permute(0, 2, 1, 3)
-        k = k_span.view(k_span.shape[0], k_span.shape[1], self.head, -1).permute(0, 2, 1, 3)
-        v = v_span.view(v_span.shape[0], v_span.shape[1], self.head, -1).permute(0, 2, 1, 3)
+        q = q_span.view(q_span.shape[0], q_span.shape[1], self.heads, -1).permute(0, 2, 1, 3)
+        k = k_span.view(k_span.shape[0], k_span.shape[1], self.heads, -1).permute(0, 2, 1, 3)
+        v = v_span.view(v_span.shape[0], v_span.shape[1], self.heads, -1).permute(0, 2, 1, 3)
         
         with torch.autocast(device_type="cuda"):
             if self.sharpen:
@@ -76,9 +76,9 @@ class FocusA(nn.Module):
         super().__init__()
         self.heads = heads
         self.max_dist = max_dist
-        self.dims = dims
         self.max_span = max_span
         self.sliding_window = win_size  
+        self.temp_scale = 0.01
         self.prev_attention_scores = None
         self.attention_history = []
         self.sharpen = sharpen
@@ -93,7 +93,7 @@ class FocusA(nn.Module):
         self.span_pred = Predictor(dims=dims)
         self.attn_local = AdaptiveSpan(dims=dims, heads=heads, max_dist=max_dist, 
                                       sharpen=sharpen, temp_scale=0.01)
-        self.attn_global = MultiheadAttention(dims=dims, heads=heads, max_dist=max_dist)
+        self.attn_global = MultiheadC(dims=dims, heads=heads, max_dist=max_dist)
         self.projection = nn.Linear(in_features=2 * dims, out_features=dims)
 
         self.ln_a = nn.LayerNorm(normalized_shape=dims)
@@ -189,12 +189,12 @@ class FocusA(nn.Module):
             v_span = value[:, :eff_span, :]
 
             batch_size, seq_len, dims = q_span.size()
-            d_k = dims // self.head
+            d_k = dims // self.heads
             scale_factor = 1 / math.sqrt(d_k)
 
-            q = q_span.view(batch_size, seq_len, self.head, -1).transpose(1, 2)
-            k = k_span.view(batch_size, seq_len, self.head, -1).transpose(1, 2)
-            v = v_span.view(batch_size, seq_len, self.head, -1).transpose(1, 2)
+            q = q_span.view(batch_size, seq_len, self.heads, -1).transpose(1, 2)
+            k = k_span.view(batch_size, seq_len, self.heads, -1).transpose(1, 2)
+            v = v_span.view(batch_size, seq_len, self.heads, -1).transpose(1, 2)
 
             if self.sharpen:
                 temperature = 1.0 + self.temp_scale * (1.0 - span_scale.mean().item())
