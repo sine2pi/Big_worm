@@ -31,15 +31,14 @@ class Predictor(nn.Module):
         return scale
 
 class AdaptiveSpan(nn.Module):
-    def __init__(self, dims, heads, max_dist, sharpen, temp_scale=0.01):
+    def __init__(self, dims, heads, max_dist, sharpen=True, temp_scale=0.01):
         super().__init__()
         self.heads = heads
         self.max_dist = max_dist
         self.dims = dims
         self.temp_scale = temp_scale
-
-        self.span_scale = nn.Parameter(torch.tensor(1.0))
         self.sharpen = sharpen
+        self.span_scale = nn.Parameter(torch.tensor(1.0))
 
     def forward(self, query, key, value, max_dist, max_span, span_scale):
         span_len = int(max_span * span_scale.mean().item())
@@ -72,16 +71,18 @@ class AdaptiveSpan(nn.Module):
         return out, weights
 
 class FocusA(nn.Module):
-    def __init__(self, dims, heads, max_dist, refiner, sharpen, win_size, max_span):
+    def __init__(self, dims, heads, max_dist, sharpen=True, win_size=256, max_span=512):
         super().__init__()
         self.heads = heads
         self.max_dist = max_dist
+        self.dims = dims
         self.max_span = max_span
         self.sliding_window = win_size  
-        self.temp_scale = 0.01
         self.prev_attention_scores = None
         self.attention_history = []
+        self.temp_scale = 0.01
         self.sharpen = sharpen
+        
         self.refiner = Refiner(
             states=10000,  
             actions=10,   
@@ -89,15 +90,15 @@ class FocusA(nn.Module):
             gamma=0.9,    
             epsilon=0.1
         )
-
+        
         self.span_pred = Predictor(dims=dims)
         self.attn_local = AdaptiveSpan(dims=dims, heads=heads, max_dist=max_dist, 
-                                      sharpen=sharpen, temp_scale=0.01)
+                                      sharpen=True, temp_scale=0.01)
         self.attn_global = MultiheadC(dims=dims, heads=heads, max_dist=max_dist)
         self.projection = nn.Linear(in_features=2 * dims, out_features=dims)
 
-        self.ln_a = nn.LayerNorm(normalized_shape=dims)
-        self.ln_b = nn.LayerNorm(normalized_shape=dims)
+        self.ln_a = LayerNorm(normalized_shape=dims)
+        self.ln_b = LayerNorm(normalized_shape=dims)
 
     def forward(self, x):
         local = self.ln_a(x)
@@ -106,7 +107,7 @@ class FocusA(nn.Module):
         globe_out, _ = self.attn_global(globe, globe, globe)
         base_span_scale = self.span_pred(globe_out.mean(dim=1))
     
-        state = self.extract_state(local)
+        state = self.extract_state(x=local)
         action = self.refiner.choose_action(state=state)
         refinement = self.action_to_span_scale(action=action)
 
@@ -150,20 +151,23 @@ class FocusA(nn.Module):
         with torch.no_grad():
             mean_state = x.mean(dim=(0, 1))
             var_state = x.var(dim=(0, 1))
-            state = torch.cat([mean_state, var_state])
+            state = torch.cat(tensors=[mean_state, var_state]).float()
             state_id = self.discretize_state(state.cpu().numpy())
         return state_id
 
     def discretize_state(self, state):
         bins = np.linspace(-1, 1, num=10)
+        
         state_discrete = np.digitize(state, bins)
-        state_id = int("".join(map(str, state_discrete)))
+        
+        state_hash = hash(tuple(state_discrete))
+        state_id = state_hash % (self.refiner.R.shape[0] - 1) 
         return state_id
-
+    
     def action_to_span_scale(self, action):
         num_actions = self.refiner.R.shape[1]
         span_scale_value = action / (num_actions - 1)
-        span_scale = torch.tensor([span_scale_value])
+        span_scale = torch.tensor(data=[span_scale_value], device=device, dtype=dtype) 
         return span_scale
         
     def _focus(self, query, key, value, span_scale):
