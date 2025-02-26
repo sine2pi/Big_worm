@@ -4,22 +4,22 @@ This is an evolving idea that has taken on a life of its own at this point.
 
 class Refiner:
     def __init__(self, states, actions, alpha=0.1, gamma=0.9, epsilon=0.1):
-        self.Q = np.zeros((states, actions))
+        self.R = np.zeros((states, actions))
         self.alpha = alpha  
         self.gamma = gamma 
         self.epsilon = epsilon
 
     def choose_action(self, state):
         if np.random.random() < self.epsilon:
-            return np.random.randint(self.Q.shape[1])
+            return np.random.randint(self.R.shape[1])
         else:
-            return np.argmax(self.Q[state])
+            return np.argmax(self.R[state])
 
     def update(self, state, action, reward, next_state):
-        best_next_action = np.argmax(self.Q[next_state])
-        td_target = reward + self.gamma * self.Q[next_state][best_next_action]
-        td_error = td_target - self.Q[state][action]
-        self.Q[state][action] += self.alpha * td_error
+        best_next_action = np.argmax(self.R[next_state])
+        td_target = reward + self.gamma * self.R[next_state][best_next_action]
+        td_error = td_target - self.R[state][action]
+        self.R[state][action] += self.alpha * td_error
        
 class Predictor(nn.Module):
     def __init__(self, dims):
@@ -104,9 +104,8 @@ class FocusA(nn.Module):
         globe = self.ln_b(x)
         
         globe_out, _ = self.attn_global(globe, globe, globe)
-        
         base_span_scale = self.span_pred(globe_out.mean(dim=1))
-        
+    
         state = self.extract_state(local)
         action = self.refiner.choose_action(state=state)
         refinement = self.action_to_span_scale(action=action)
@@ -133,9 +132,9 @@ class FocusA(nn.Module):
         )
         
         with torch.no_grad():
-            attention_quality = self.compute_attention_quality(local_out)
+            attention_quality = self.compute_attention_quality(output=local_out)
             next_state = self.extract_state(local_out)
-            self.refiner.update(state, action, attention_quality, next_state)
+            self.refiner.update(state=state, action=action, reward=attention_quality, next_state=next_state)
         
         combined = torch.cat(tensors=[local_out, globe_out], dim=-1)
         x = self.projection(combined)
@@ -162,7 +161,7 @@ class FocusA(nn.Module):
         return state_id
 
     def action_to_span_scale(self, action):
-        num_actions = self.refiner.Q.shape[1]
+        num_actions = self.refiner.R.shape[1]
         span_scale_value = action / (num_actions - 1)
         span_scale = torch.tensor([span_scale_value])
         return span_scale
@@ -237,8 +236,6 @@ class FocusA(nn.Module):
             output[:, start_idx:end_idx, :] = attn_out
 
         return output
-    
-
     
 
     
