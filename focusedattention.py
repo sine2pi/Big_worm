@@ -1,5 +1,5 @@
 
-class QAgent:
+class Refiner:
     def __init__(self, states, actions, alpha=0.1, gamma=0.9, epsilon=0.1):
         self.Q = np.zeros((states, actions))
         self.alpha = alpha  
@@ -18,7 +18,7 @@ class QAgent:
         td_error = td_target - self.Q[state][action]
         self.Q[state][action] += self.alpha * td_error
        
-class SpanPredictor(nn.Module):
+class Predictor(nn.Module):
     def __init__(self, dims):
         super().__init__()
         self.linear = nn.Linear(in_features=dims, out_features=1)
@@ -69,18 +69,17 @@ class AdaptiveSpan(nn.Module):
         return out, weights
 
 class FocusA(nn.Module):
-    def __init__(self, dims, heads, max_dist, q_agent, sharpen, win_size, max_span):
+    def __init__(self, dims, heads, max_dist, refiner, sharpen, win_size, max_span):
         super().__init__()
         self.heads = heads
         self.max_dist = max_dist
         self.dims = dims
         self.max_span = max_span
-        self.win_size = win_size
         self.sliding_window = win_size  
         self.prev_attention_scores = None
         self.attention_history = []
         self.sharpen = sharpen
-        self.q_agent = QAgent(
+        self.refiner = Refiner(
             states=10000,  
             actions=10,   
             alpha=0.1,   
@@ -88,7 +87,7 @@ class FocusA(nn.Module):
             epsilon=0.1
         )
 
-        self.span_pred = SpanPredictor(dims=dims)
+        self.span_pred = Predictor(dims=dims)
         self.attn_local = AdaptiveSpan(dims=dims, heads=heads, max_dist=max_dist, 
                                       sharpen=sharpen, temp_scale=0.01)
         self.attn_global = MultiheadAttention(dims=dims, heads=heads, max_dist=max_dist)
@@ -100,20 +99,22 @@ class FocusA(nn.Module):
     def forward(self, x):
         local = self.ln_a(x)
         globe = self.ln_b(x)
-        state = self.extract_state(local)
-        action = self.q_agent.choose_action(state)
         
-        span_scale = self.action_to_span_scale(action)
-        span_scale = torch.clamp(span_scale, min=0.0, max=1.0)
         globe_out, _ = self.attn_global(globe, globe, globe)
+        
+        base_span_scale = self.span_pred(globe_out.mean(dim=1))
+        
+        state = self.extract_state(local)
+        action = self.refiner.choose_action(state=state)
+        refinement = self.action_to_span_scale(action=action)
 
-        span_scale = self.span_pred(globe_out.mean(dim=1))
+        span_scale = torch.clamp(base_span_scale * refinement, min=0.0, max=1.0)
         span_mean = span_scale.mean().item()
 
         with torch.no_grad(): 
             current_win_size = max(1, int(self.sliding_window * span_mean))
             current_span_len = max(1, int(self.max_span * span_mean))
-        
+
         effective_max = int(min(self.max_dist, local.size(1)))
         local_max = int(min(self.max_dist, current_span_len, current_win_size))
         globe_max = effective_max
@@ -128,14 +129,27 @@ class FocusA(nn.Module):
             span_scale=span_scale  
         )
         
+        with torch.no_grad():
+            attention_quality = self.compute_attention_quality(local_out)
+            next_state = self.extract_state(local_out)
+            self.refiner.update(state, action, attention_quality, next_state)
+        
         combined = torch.cat(tensors=[local_out, globe_out], dim=-1)
         x = self.projection(combined)
         return x
-    
+
+    def compute_attention_quality(self, output):
+        with torch.no_grad():
+            attention_entropy = -(output * torch.log(output + 1e-10)).sum(-1).mean()
+            coverage = (output > 0.01).float().mean()
+            return float(coverage - 0.1 * attention_entropy)
+
     def extract_state(self, x):
         with torch.no_grad():
-            state = x.mean(dim=(0, 1)).cpu().numpy()
-            state_id = self.discretize_state(state)
+            mean_state = x.mean(dim=(0, 1))
+            var_state = x.var(dim=(0, 1))
+            state = torch.cat([mean_state, var_state])
+            state_id = self.discretize_state(state.cpu().numpy())
         return state_id
 
     def discretize_state(self, state):
@@ -145,7 +159,7 @@ class FocusA(nn.Module):
         return state_id
 
     def action_to_span_scale(self, action):
-        num_actions = self.q_agent.Q.shape[1]
+        num_actions = self.refiner.Q.shape[1]
         span_scale_value = action / (num_actions - 1)
         span_scale = torch.tensor([span_scale_value])
         return span_scale
@@ -199,7 +213,6 @@ class FocusA(nn.Module):
             query = query + attn_out  
             iteration += 1 
         return attn_out, attn_weights
-    
     
     def slide_win(self, x, win_size, span_len, span_scale):
         self.batch_size, seq_len, self.dims = x.size()
