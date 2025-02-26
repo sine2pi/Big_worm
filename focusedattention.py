@@ -1,4 +1,23 @@
 
+class QAgent:
+    def __init__(self, states, actions, alpha=0.1, gamma=0.9, epsilon=0.1):
+        self.Q = np.zeros((states, actions))
+        self.alpha = alpha  
+        self.gamma = gamma 
+        self.epsilon = epsilon
+
+    def choose_action(self, state):
+        if np.random.random() < self.epsilon:
+            return np.random.randint(self.Q.shape[1])
+        else:
+            return np.argmax(self.Q[state])
+
+    def update(self, state, action, reward, next_state):
+        best_next_action = np.argmax(self.Q[next_state])
+        td_target = reward + self.gamma * self.Q[next_state][best_next_action]
+        td_error = td_target - self.Q[state][action]
+        self.Q[state][action] += self.alpha * td_error
+       
 class SpanPredictor(nn.Module):
     def __init__(self, dims):
         super().__init__()
@@ -58,8 +77,17 @@ class FocusA(nn.Module):
         self.max_span = max_span
         self.win_size = win_size
         self.sliding_window = win_size  
-        self.q_agent = q_agent
+        self.prev_attention_scores = None
+        self.attention_history = []
         self.sharpen = sharpen
+        self.q_agent = QAgent(
+            states=10000,  
+            actions=10,   
+            alpha=0.1,   
+            gamma=0.9,    
+            epsilon=0.1
+        )
+
         self.span_pred = SpanPredictor(dims=dims)
         self.attn_local = AdaptiveSpan(dims=dims, heads=heads, max_dist=max_dist, 
                                       sharpen=sharpen, temp_scale=0.01)
@@ -74,15 +102,17 @@ class FocusA(nn.Module):
         globe = self.ln_b(x)
         state = self.extract_state(local)
         action = self.q_agent.choose_action(state)
+        
         span_scale = self.action_to_span_scale(action)
-
+        span_scale = torch.clamp(span_scale, min=0.0, max=1.0)
         globe_out, _ = self.attn_global(globe, globe, globe)
 
         span_scale = self.span_pred(globe_out.mean(dim=1))
         span_mean = span_scale.mean().item()
 
-        current_win_size = max(1, int(self.sliding_window * span_mean))
-        current_span_len = max(1, int(self.max_span * span_mean))
+        with torch.no_grad(): 
+            current_win_size = max(1, int(self.sliding_window * span_mean))
+            current_span_len = max(1, int(self.max_span * span_mean))
         
         effective_max = int(min(self.max_dist, local.size(1)))
         local_max = int(min(self.max_dist, current_span_len, current_win_size))
@@ -169,7 +199,8 @@ class FocusA(nn.Module):
             query = query + attn_out  
             iteration += 1 
         return attn_out, attn_weights
-        
+    
+    
     def slide_win(self, x, win_size, span_len, span_scale):
         self.batch_size, seq_len, self.dims = x.size()
         num_windows = (seq_len + win_size - 1) // win_size
