@@ -1,37 +1,35 @@
-import torch
-import torch.nn as nn, numpy as np
+import torch, math, torch.nn as nn, numpy as np, torch.nn.functional as F
 from torch import Tensor
 from typing import Optional
-import torch.nn.functional as F
-import math
 from torch.nn.functional import scaled_dot_product_attention
 
-def interleave(self, local_out, globe_out):
-    batch_size, seq_len, dims = local_out.size()
-    if globe_out.size() != local_out.size():
-        raise ValueError("local_out and globe_out must have the same dimensions for interleaving")
-    interleaved = torch.stack((local_out, globe_out), dim=2)  
-    interleaved = interleaved.view(batch_size, seq_len, 2 * dims)  
-    interleaved = self.projection(interleaved)
-    return interleaved
-
-class MultiheadAttention(nn.Module):
-    use_sdpa = True
-
-    def __init__(self, dims, heads, max_dist):
+class MultiheadC(nn.Module):
+    use_sdpa: bool = True
+    def __init__(self, dims: int, heads: int, max_dist: int):
         super().__init__()
-        self.dims = dims
+        if dims % heads != 0:
+            raise ValueError(f"dims ({dims}) must be divisible by heads ({heads})")
+        if dims % 2 != 0:
+            raise ValueError(f"dims ({dims}) must be even for rotary embeddings")
         self.heads = heads
-        assert dims % heads == 0, "dims must be divisible by heads"
         self.head_dim = dims // heads
-        assert self.head_dim % 2 == 0, "Head dimension must be even for rotary embeddings"
+        self.dims = dims
         self.max_dist = max_dist
+
+        scale = 1 / math.sqrt(self.head_dim)
         self.query = nn.Linear(dims, dims)
         self.key = nn.Linear(dims, dims, bias=False)
         self.value = nn.Linear(dims, dims)
         self.out = nn.Linear(dims, dims)
         
-    def forward(self, x, xa=None, mask=None, kv_cache=None):
+        nn.init.normal_(self.query.weight, std=scale)
+        nn.init.normal_(self.key.weight, std=scale)
+        nn.init.normal_(self.value.weight, std=scale)
+        nn.init.zeros_(self.out.bias)
+        
+    def forward(self, x: Tensor, xa: Optional[Tensor] = None,
+                mask: Optional[Tensor] = None, kv_cache: Optional[Dict] = None) -> Tuple[Tensor, Optional[Tensor]]:
+
         q = self.query(x)
         
         if kv_cache is None or xa is None or self.key not in kv_cache:
@@ -41,25 +39,26 @@ class MultiheadAttention(nn.Module):
             k = kv_cache[self.key]
             v = kv_cache[self.value]
 
-        # k = k[:, :self.max_dist, :]
-        # v = v[:, :self.max_dist, :]
-
         wv, qk = self.qkv_attention(q=q, k=k, v=v, mask=mask)
-        out = self.out(wv)
-        return out, qk
-
-    def qkv_attention(self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None):
+        return self.out(wv), qk
+    
+    def qkv_attention(self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None) -> Tuple[Tensor, Optional[Tensor]]:
+   
         batch, ctx, dims = q.shape
         scale = (dims // self.heads) ** -0.25
         q = q.view(batch, ctx, self.heads, self.head_dim).permute(0, 2, 1, 3)
         k = k.view(batch, ctx, self.heads, self.head_dim).permute(0, 2, 1, 3)
         v = v.view(batch, ctx, self.heads, self.head_dim).permute(0, 2, 1, 3)
 
-        # k = k[:, :, :self.max_dist, :]
-        # v = v[:, :, :self.max_dist, :]
+        if self.use_sdpa and torch.cuda.is_available():
 
-        if MultiheadAttention.use_sdpa:
-            a = scaled_dot_product_attention(query=q, key=k, value=v, is_causal=mask is not None and ctx > 1)
+            with torch.autocast('cuda'):
+                a = scaled_dot_product_attention(
+                    query=q,
+                    key=k,
+                    value=v,
+                    is_causal=mask is not None and ctx > 1
+                )
             out = a.permute(0, 2, 1, 3).flatten(start_dim=2)
             qk = None
         else:
@@ -68,10 +67,9 @@ class MultiheadAttention(nn.Module):
                 qk = qk + mask[:ctx, :ctx]
             qk = qk.float()
 
-            w = F.softmax(qk, dim=-1).to(dtype=q.dtype)
+            w = F.softmax(qk, dim=-1).to(q.dtype)
             out = (w @ v).permute(0, 2, 1, 3).flatten(start_dim=2)
             qk = qk.detach()
-
         return out, qk
 
 class Refiner:
@@ -105,7 +103,7 @@ class Predictor(nn.Module):
 class AdaptiveSpan(nn.Module):
     def __init__(self, dims, heads, max_dist, sharpen, temp_scale=0.01):
         super().__init__()
-        self.head = heads
+        self.heads = heads
         self.max_dist = max_dist
         self.dims = dims
         self.temp_scale = temp_scale
@@ -123,11 +121,11 @@ class AdaptiveSpan(nn.Module):
         v_span = value[:, :eff_span, :]
             
         batch_size, _, dims = query.shape
-        scale = (dims // self.head) ** -0.25
+        scale = (dims // self.heads) ** -0.25
       
-        q = q_span.view(q_span.shape[0], q_span.shape[1], self.head, -1).permute(0, 2, 1, 3)
-        k = k_span.view(k_span.shape[0], k_span.shape[1], self.head, -1).permute(0, 2, 1, 3)
-        v = v_span.view(v_span.shape[0], v_span.shape[1], self.head, -1).permute(0, 2, 1, 3)
+        q = q_span.view(q_span.shape[0], q_span.shape[1], self.heads, -1).permute(0, 2, 1, 3)
+        k = k_span.view(k_span.shape[0], k_span.shape[1], self.heads, -1).permute(0, 2, 1, 3)
+        v = v_span.view(v_span.shape[0], v_span.shape[1], self.heads, -1).permute(0, 2, 1, 3)
         
         with torch.autocast(device_type="cuda"):
             if self.sharpen:
@@ -148,9 +146,9 @@ class FocusA(nn.Module):
         super().__init__()
         self.heads = heads
         self.max_dist = max_dist
-        self.dims = dims
         self.max_span = max_span
         self.sliding_window = win_size  
+        self.temp_scale = 0.01
         self.prev_attention_scores = None
         self.attention_history = []
         self.sharpen = sharpen
@@ -165,7 +163,7 @@ class FocusA(nn.Module):
         self.span_pred = Predictor(dims=dims)
         self.attn_local = AdaptiveSpan(dims=dims, heads=heads, max_dist=max_dist, 
                                       sharpen=sharpen, temp_scale=0.01)
-        self.attn_global = MultiheadAttention(dims=dims, heads=heads, max_dist=max_dist)
+        self.attn_global = MultiheadC(dims=dims, heads=heads, max_dist=max_dist)
         self.projection = nn.Linear(in_features=2 * dims, out_features=dims)
 
         self.ln_a = nn.LayerNorm(normalized_shape=dims)
@@ -261,12 +259,12 @@ class FocusA(nn.Module):
             v_span = value[:, :eff_span, :]
 
             batch_size, seq_len, dims = q_span.size()
-            d_k = dims // self.head
+            d_k = dims // self.heads
             scale_factor = 1 / math.sqrt(d_k)
 
-            q = q_span.view(batch_size, seq_len, self.head, -1).transpose(1, 2)
-            k = k_span.view(batch_size, seq_len, self.head, -1).transpose(1, 2)
-            v = v_span.view(batch_size, seq_len, self.head, -1).transpose(1, 2)
+            q = q_span.view(batch_size, seq_len, self.heads, -1).transpose(1, 2)
+            k = k_span.view(batch_size, seq_len, self.heads, -1).transpose(1, 2)
+            v = v_span.view(batch_size, seq_len, self.heads, -1).transpose(1, 2)
 
             if self.sharpen:
                 temperature = 1.0 + self.temp_scale * (1.0 - span_scale.mean().item())
