@@ -1,22 +1,97 @@
+import torch
+import torch.nn as nn, numpy as np
+from torch import Tensor
+from typing import Optional
+import torch.nn.functional as F
+import math
+from torch.nn.functional import scaled_dot_product_attention
+
+def interleave(self, local_out, globe_out):
+    batch_size, seq_len, dims = local_out.size()
+    if globe_out.size() != local_out.size():
+        raise ValueError("local_out and globe_out must have the same dimensions for interleaving")
+    interleaved = torch.stack((local_out, globe_out), dim=2)  
+    interleaved = interleaved.view(batch_size, seq_len, 2 * dims)  
+    interleaved = self.projection(interleaved)
+    return interleaved
+
+class MultiheadAttention(nn.Module):
+    use_sdpa = True
+
+    def __init__(self, dims, heads, max_dist):
+        super().__init__()
+        self.dims = dims
+        self.heads = heads
+        assert dims % heads == 0, "dims must be divisible by heads"
+        self.head_dim = dims // heads
+        assert self.head_dim % 2 == 0, "Head dimension must be even for rotary embeddings"
+        self.max_dist = max_dist
+        self.query = nn.Linear(dims, dims)
+        self.key = nn.Linear(dims, dims, bias=False)
+        self.value = nn.Linear(dims, dims)
+        self.out = nn.Linear(dims, dims)
+        
+    def forward(self, x, xa=None, mask=None, kv_cache=None):
+        q = self.query(x)
+        
+        if kv_cache is None or xa is None or self.key not in kv_cache:
+            k = self.key(x if xa is None else xa)
+            v = self.value(x if xa is None else xa)
+        else:
+            k = kv_cache[self.key]
+            v = kv_cache[self.value]
+
+        # k = k[:, :self.max_dist, :]
+        # v = v[:, :self.max_dist, :]
+
+        wv, qk = self.qkv_attention(q=q, k=k, v=v, mask=mask)
+        out = self.out(wv)
+        return out, qk
+
+    def qkv_attention(self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None):
+        batch, ctx, dims = q.shape
+        scale = (dims // self.heads) ** -0.25
+        q = q.view(batch, ctx, self.heads, self.head_dim).permute(0, 2, 1, 3)
+        k = k.view(batch, ctx, self.heads, self.head_dim).permute(0, 2, 1, 3)
+        v = v.view(batch, ctx, self.heads, self.head_dim).permute(0, 2, 1, 3)
+
+        # k = k[:, :, :self.max_dist, :]
+        # v = v[:, :, :self.max_dist, :]
+
+        if MultiheadAttention.use_sdpa:
+            a = scaled_dot_product_attention(query=q, key=k, value=v, is_causal=mask is not None and ctx > 1)
+            out = a.permute(0, 2, 1, 3).flatten(start_dim=2)
+            qk = None
+        else:
+            qk = (q * scale) @ (k * scale).transpose(-1, -2)
+            if mask is not None:
+                qk = qk + mask[:ctx, :ctx]
+            qk = qk.float()
+
+            w = F.softmax(qk, dim=-1).to(dtype=q.dtype)
+            out = (w @ v).permute(0, 2, 1, 3).flatten(start_dim=2)
+            qk = qk.detach()
+
+        return out, qk
 
 class Refiner:
     def __init__(self, states, actions, alpha=0.1, gamma=0.9, epsilon=0.1):
-        self.Q = np.zeros((states, actions))
+        self.R = np.zeros((states, actions))
         self.alpha = alpha  
         self.gamma = gamma 
         self.epsilon = epsilon
 
     def choose_action(self, state):
         if np.random.random() < self.epsilon:
-            return np.random.randint(self.Q.shape[1])
+            return np.random.randint(self.R.shape[1])
         else:
-            return np.argmax(self.Q[state])
+            return np.argmax(self.R[state])
 
     def update(self, state, action, reward, next_state):
-        best_next_action = np.argmax(self.Q[next_state])
-        td_target = reward + self.gamma * self.Q[next_state][best_next_action]
-        td_error = td_target - self.Q[state][action]
-        self.Q[state][action] += self.alpha * td_error
+        best_next_action = np.argmax(self.R[next_state])
+        td_target = reward + self.gamma * self.R[next_state][best_next_action]
+        td_error = td_target - self.R[state][action]
+        self.R[state][action] += self.alpha * td_error
        
 class Predictor(nn.Module):
     def __init__(self, dims):
@@ -101,9 +176,8 @@ class FocusA(nn.Module):
         globe = self.ln_b(x)
         
         globe_out, _ = self.attn_global(globe, globe, globe)
-        
         base_span_scale = self.span_pred(globe_out.mean(dim=1))
-        
+    
         state = self.extract_state(local)
         action = self.refiner.choose_action(state=state)
         refinement = self.action_to_span_scale(action=action)
@@ -130,9 +204,9 @@ class FocusA(nn.Module):
         )
         
         with torch.no_grad():
-            attention_quality = self.compute_attention_quality(local_out)
+            attention_quality = self.compute_attention_quality(output=local_out)
             next_state = self.extract_state(local_out)
-            self.refiner.update(state, action, attention_quality, next_state)
+            self.refiner.update(state=state, action=action, reward=attention_quality, next_state=next_state)
         
         combined = torch.cat(tensors=[local_out, globe_out], dim=-1)
         x = self.projection(combined)
@@ -159,7 +233,7 @@ class FocusA(nn.Module):
         return state_id
 
     def action_to_span_scale(self, action):
-        num_actions = self.refiner.Q.shape[1]
+        num_actions = self.refiner.R.shape[1]
         span_scale_value = action / (num_actions - 1)
         span_scale = torch.tensor([span_scale_value])
         return span_scale
