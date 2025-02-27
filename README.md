@@ -1,6 +1,7 @@
 
 
 ``` python
+
 import torch
 import torch.nn as nn
 import numpy as np
@@ -351,7 +352,6 @@ class FocusA(nn.Module):
             output[:, start_idx:end_idx, :] = attn_out
 
         return output
-    
 ```
 
 
