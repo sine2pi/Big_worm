@@ -1,4 +1,4 @@
-This is an evolving idea that has taken on a life of its own at this point.
+
 
 ``` python
 import torch
