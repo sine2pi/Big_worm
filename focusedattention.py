@@ -116,6 +116,7 @@ class Predictor(nn.Module):
         if global_out.dim() > 2:
             global_out = global_out.mean(dim=1)
         scale = torch.sigmoid(self.linear(global_out))
+        
         return scale
 
 class AdaptiveSpan(nn.Module):
@@ -131,20 +132,22 @@ class AdaptiveSpan(nn.Module):
         self.head_dim = dims // heads
         self.register_buffer("scale", torch.tensor(self.head_dim**-0.25))
 
-    def forward(self, query, key, value, max_dist, max_span, span_scale, mask):
+    def forward(self, query, key, value, max_dist=None, max_span=None, span_scale=None):
+        if max_dist is None:
+            max_dist = self.max_dist
+        if max_span is None:
+            max_span = query.shape[1]  # Default to sequence length
+        if span_scale is None:
+            span_scale = self.span_scale
+            
         span_mean = span_scale.mean().item()
-        span_len = min(
-            int(max_span * span_mean), query.shape[1], key.shape[1], value.shape[1]
-        )
+        span_len = min(int(max_span * span_mean), query.shape[1], key.shape[1], value.shape[1])
         eff_span = min(span_len, max_dist)
-
+        
         if eff_span == 0:
             batch_size = query.shape[0]
-            return (
-                torch.zeros(batch_size, eff_span, self.dims, device=query.device),
-                None,
-            )
-
+            return (torch.zeros(batch_size, eff_span, self.dims, device=query.device), None)
+            
         q_span = query[:, :eff_span, :]
         k_span = key[:, :eff_span, :]
         v_span = value[:, :eff_span, :]
@@ -166,6 +169,7 @@ class AdaptiveSpan(nn.Module):
             weights = torch.softmax((scores / temperature) * self.scale, dim=-1)
             out = torch.matmul(weights, v)
             out = out.permute(0, 2, 1, 3).reshape(batch_size, eff_span, self.dims)
+
         return out, weights
 
 class FocusA(nn.Module):
@@ -179,6 +183,7 @@ class FocusA(nn.Module):
         self.temp_scale = 0.01
         self.sharpen = sharpen
         self.head_dim = dims // heads
+        self.batch_size = None  # Will be set during forward pass
 
         self.refiner = Refiner(
             states=10000, actions=10, alpha=0.1, gamma=0.9, epsilon=0.1
@@ -196,11 +201,10 @@ class FocusA(nn.Module):
 
         mask = torch.empty(max_span, max_span).fill_(float("-inf")).triu_(diagonal=1)
         self.register_buffer("mask", mask, persistent=False)
-        self.mask = mask
 
-        self.register_buffer("window_mask_template", None, persistent=False)
-        self.register_buffer("focus_threshold", torch.tensor(1e-4), persistent=False)
-        self.register_buffer("focus_s_factor", torch.tensor(0.1), persistent=False)
+        self.register_buffer("window_mask", None, persistent=False)
+        self.register_buffer("threshold", torch.tensor(1e-4), persistent=False)
+        self.register_buffer("s_factor", torch.tensor(0.1), persistent=False)
 
     def forward(self, x, xa=None, mask=None, kv_cache=None):
         if mask is None:
@@ -210,7 +214,7 @@ class FocusA(nn.Module):
         globe = self.ln_b(x)
 
         globe_out, _ = self.attn_global(globe, globe, globe)
-        base_scale = self.span_pred(globe_out.mean(dim=1))
+        base_scale = self.span_pred(globe_out)
         state = self.extract(local)
 
         action = self.refiner.choose_action(state=state)
@@ -282,8 +286,8 @@ class FocusA(nn.Module):
         attn_out = torch.zeros_like(input=query)
         attn_weights = None
 
-        threshold = 1e-4
-        s_factor = 0.1
+        threshold = self.threshold.item()
+        s_factor = self.s_factor.item()
 
         while iteration < max_iterations:
             span_len = int(self.max_span * span_scale.mean().item())
@@ -354,11 +358,9 @@ class FocusA(nn.Module):
     def slide_win(self, x, win_size, span_len, span_scale, mask):
         batch_size, seq_len, dims = x.size()
         self.batch_size = batch_size
-        self.dims = dims
         num_windows = (seq_len + win_size - 1) // win_size
         output = torch.zeros_like(x)
         device = x.device
-        default_mask_shape = (batch_size, self.heads, 1, 1)
         default_mask = None
 
         for i in range(num_windows):
