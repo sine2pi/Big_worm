@@ -362,7 +362,7 @@ class FocusA(nn.Module):
 
 3. Tasks Requiring Precise Identification within Broad Context
    
-4. Hierarchical Reasoning:
+4. Hierarchical Reasoning
    
 5. Sparsity Inducement
    
