@@ -17,119 +17,102 @@ class Linear(nn.Linear):
         return F.linear(
             x,
             self.weight.to(x.dtype),
-            None if self.bias is None else self.bias.to(x.dtype),
-        )
-
-class QueryModule(nn.Module):
-    """Dedicated query projection module that handles only query transformations."""
-    def __init__(self, dims: int, head: int):
-        super().__init__()
-        assert dims % head == 0, f"dims ({dims}) must be divisible by head ({head})"
-        self.dims = dims
-        self.head = head
-        self.head_dim = dims // head
-        self.scale = self.head_dim ** -0.25
-        self.q = Linear(in_features=dims, out_features=dims)
-        self.init_weights()
-    def init_weights(self):
-        nn.init.normal_(tensor=self.q.weight, std=0.02)
-        if self.q.bias is not None:
-            nn.init.zeros_(tensor=self.q.bias)
-    
-    def forward(self, x: Tensor) -> Tensor:
-        batch, ctx = x.shape[:2]
-        q = self.q(x)
+            None if self.bias is None else self.bias.to(x.dtype))
         
-        q = q.view(batch, ctx, self.head, self.head_dim).permute(0, 2, 1, 3)
-        q = q * self.scale
-        return q
-
-class KeyModule(nn.Module):
-    """Dedicated key projection module that handles only key transformations."""
-    
-    def __init__(self, dims: int, head: int):
-        """ Args: dims: Input/output dimension size head: Number of attention head"""
+class ProjectionModule(nn.Module):
+    """Unified projection module that handles query, key, and value transformations."""
+    def __init__(self, dims: int, head: int, proj_type: str = "query", use_bias: bool = True):
         super().__init__()
         assert dims % head == 0, f"dims ({dims}) must be divisible by head ({head})"
         self.dims = dims
         self.head = head
         self.head_dim = dims // head
-        self.scale = self.head_dim ** -0.25
-        self.key = Linear(in_features=dims, out_features=dims, bias=False)
+        self.proj_type = proj_type
+        self.scale = self.head_dim ** -0.25 if proj_type != "value" else 1.0
+        self.proj = Linear(in_features=dims, out_features=dims, bias=use_bias)
         self.init_weights()
-
-    def init_weights(self):
-        nn.init.normal_(tensor=self.key.weight, std=0.02)
-    
-    def forward(self, x: Tensor) -> Tensor:
-        batch, ctx = x.shape[:2]
-        k = self.key(x)
-        k = k.view(batch, ctx, self.head, self.head_dim).permute(0, 2, 1, 3)
-        k = k * self.scale
-        return k
-
-class ValueModule(nn.Module):
-    """Dedicated value projection module that handles only value transformations."""
-    def __init__(self, dims: int, head: int):
-    
-        super().__init__()
-        assert dims % head == 0, f"dims ({dims}) must be divisible by head ({head})"
-        self.dims = dims
-        self.head = head
-        self.head_dim = dims // head
-        self.value = Linear(in_features=dims, out_features=dims)
-        self.init_weights()
-    
-    def init_weights(self):
-        nn.init.normal_(tensor=self.value.weight, std=0.02)
-        if self.value.bias is not None:
-            nn.init.zeros_(tensor=self.value.bias)
-    
-    def forward(self, x: Tensor) -> Tensor:
-      
-        batch, ctx = x.shape[:2]
-        v = self.value(x)
-        v = v.view(batch, ctx, self.head, self.head_dim).permute(0, 2, 1, 3)
-        return v
-
-class KeyValueModule(nn.Module):
-    
-    def __init__(self, dims: int, head: int):
-        super().__init__()
         
-        self.key_module = KeyModule(dims, head)
-        self.value_module = ValueModule(dims, head)
+    def init_weights(self):
+        nn.init.normal_(tensor=self.proj.weight, std=0.02)
+        if hasattr(self.proj, 'bias') and self.proj.bias is not None:
+            nn.init.zeros_(tensor=self.proj.bias)
     
-    def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
-        k = self.key_module(x)
-        v = self.value_module(x)
-        return k, v
+    def forward(self, x: Tensor) -> Tensor:
+        batch, ctx = x.shape[:2]
+        proj = self.proj(x)
+        
+        proj = proj.view(batch, ctx, self.head, self.head_dim).permute(0, 2, 1, 3)
+        if self.proj_type in ["query", "key"]:
+            proj = proj * self.scale
+        return proj
 
+def prepare_mask_for_attention(attn, mask):
+    """Prepares and applies mask to attention scores."""
+    batch, head, q_len, k_len = attn.shape
+    
+    if mask.dim() == 2:
+        mask_len = min(mask.size(0), q_len)
+        mask_to_apply = mask[:mask_len, :mask_len]
+        attn[:, :, :mask_len, :mask_len] = attn[:, :, :mask_len, :mask_len] + mask_to_apply
+    elif mask.dim() == 3:
+        mask_len = min(mask.size(1), q_len)
+        mask_to_apply = mask[:, :mask_len, :mask_len]
+        attn[:, :, :mask_len, :mask_len] = attn[:, :, :mask_len, :mask_len] + mask_to_apply.unsqueeze(1)
+    elif mask.dim() == 4:
+        mask_q_len = min(mask.size(2), q_len)
+        mask_k_len = min(mask.size(3), k_len)
+        attn[:, :, :mask_q_len, :mask_k_len] = attn[:, :, :mask_q_len, :mask_k_len] + mask[:, :, :mask_q_len, :mask_k_len]
+    
+    return attn
 
-class AttentionCombiner(nn.Module):
-    """Combines separate Q and KV representations for attention computation."""
+def calculate_attention(q, k, v, mask=None, temperature=1.0, use_sdpa=True):
+    """Shared attention calculation logic."""
+    if use_sdpa:
+        try:
+            is_causal = mask is not None and q.size(2) > 1
+            attn_output = scaled_dot_product_attention(q, k, v, is_causal=is_causal)
+            return attn_output, None
+        except RuntimeError:
+            pass
+    
+    attn = torch.matmul(q, k.transpose(-1, -2))
+    
+    if mask is not None:
+        attn = prepare_mask_for_attention(attn, mask)
+    
+    attn = F.softmax(attn / temperature, dim=-1)
+    attn_output = torch.matmul(attn, v)
+    
+    return attn_output, attn
+
+class BaseAttention(nn.Module):
+    """Base class for attention mechanisms with common functionality."""
     use_sdpa = True
-    def __init__(self, dims: int, head: int):
+    
+    def __init__(self, dims: int, head: int, max_dist: int = 512):
         super().__init__()
-        
         assert dims % head == 0, f"dims ({dims}) must be divisible by head ({head})"
-        
         self.dims = dims
         self.head = head
         self.head_dim = dims // head
+        self.max_dist = max_dist
+        self.scale = self.head_dim ** -0.25
         
+    def _reshape_to_output(self, attn_output, batch, seq_len):
+        """Reshape attention output to original dimensions."""
+        return attn_output.permute(0, 2, 1, 3).reshape(batch, seq_len, self.dims)
+
+class AttentionCombiner(BaseAttention):
+    """Combines separate Q and KV representations for attention computation."""
+    def __init__(self, dims: int, head: int):
+        super().__init__(dims, head)
         self.out = Linear(in_features=dims, out_features=dims)
         nn.init.normal_(tensor=self.out.weight, std=0.02)
         nn.init.zeros_(tensor=self.out.bias)
 
-    @autocast('cuda', enabled = True)
+    @autocast('cuda', enabled=True)
     def forward(self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None) -> Tensor:
-        """
-        Args:
-            q, k, v: Tensors of shape [batch, head, ctx, head_dim] or [batch, ctx, dims]
-            mask: Optional mask tensor
-
-        """
+        """Processes and combines attention inputs."""
         if q.dim() == 3:
             batch, ctx, _ = q.shape
             q = q.view(batch, ctx, self.head, self.head_dim).permute(0, 2, 1, 3)
@@ -139,61 +122,25 @@ class AttentionCombiner(nn.Module):
             batch = q.size(0)
             ctx = q.size(2)
 
-        if AttentionCombiner.use_sdpa:
-            try:
-                attn_output = scaled_dot_product_attention(
-                    q, k, v, is_causal=mask is not None and ctx > 1
-                )
-            except RuntimeError:
-                print(f"SDPA failed with shapes: q={q.shape}, k={k.shape}, v={v.shape}")
-                attn = torch.matmul(q, k.transpose(-1, -2))
-                if mask is not None:
-                    if mask.dim() <= 2:
-                        mask_to_use = mask[:ctx, :k.size(2)]
-                        attn = attn + mask_to_use
-                    else:
-                        pass
-                attn = F.softmax(attn, dim=-1)
-                attn_output = torch.matmul(attn, v)
-        else:
-            attn = torch.matmul(q, k.transpose(-1, -2))
-            
-            if mask is not None:
-                if mask.dim() == 2:
-                    mask_len = min(mask.size(0), ctx)
-                    mask_to_apply = mask[:mask_len, :mask_len]
-                    attn[:, :, :mask_len, :mask_len] = attn[:, :, :mask_len, :mask_len] + mask_to_apply
-                elif mask.dim() == 3:
-                    mask_len = min(mask.size(1), ctx)
-                    mask_to_apply = mask[:, :mask_len, :mask_len]
-                    attn[:, :, :mask_len, :mask_len] = attn[:, :, :mask_len, :mask_len] + mask_to_apply.unsqueeze(1)
-                elif mask.dim() == 4:
-                    mask_q_len = min(mask.size(2), ctx)
-                    mask_k_len = min(mask.size(3), k.size(2))
-                    attn[:, :, :mask_q_len, :mask_k_len] = attn[:, :, :mask_q_len, :mask_k_len] + mask[:, :, :mask_q_len, :mask_k_len]
-                
-            attn = F.softmax(attn, dim=-1)
-            attn_output = torch.matmul(attn, v)
+        attn_output, _ = calculate_attention(q, k, v, mask, 1.0, BaseAttention.use_sdpa)
         
-        output = attn_output.permute(0, 2, 1, 3).reshape(batch, ctx, self.dims)
+        output = self._reshape_to_output(attn_output, batch, ctx)
         return self.out(output)
 
-class AdaptiveUpdateAttention(nn.Module):
+class AdaptiveUpdateAttention(BaseAttention):
     """Attention implementation with content-dependent update frequencies."""
     def __init__(self, dims: int, head: int, max_dist=512):
-        super().__init__()
-        self.query_module = QueryModule(dims, head)
-        self.key_module = KeyModule(dims, head)
-        self.value_module = ValueModule(dims, head)
+        super().__init__(dims, head, max_dist)
+        
+        self.query_module = ProjectionModule(dims, head, "query")
+        self.key_module = ProjectionModule(dims, head, "key")
+        self.value_module = ProjectionModule(dims, head, "value")
+        
         self.combiner = AttentionCombiner(dims, head)
-        self.max_dist = max_dist
-        self.head = head
-        self.dims = dims
-
+        
         self.key_update_predictor = nn.Sequential(
             Linear(dims, dims // 4), nn.ReLU(), Linear(dims // 4, 1), nn.Sigmoid()
         )
-
         self.value_update_predictor = nn.Sequential(
             Linear(dims, dims // 4), nn.ReLU(), Linear(dims // 4, 1), nn.Sigmoid()
         )
@@ -213,7 +160,7 @@ class AdaptiveUpdateAttention(nn.Module):
         return self.value_update_predictor(avg_rep) > self.update_threshold
 
     def forward(self, x, xa=None, mask=None, kv_cache=None):
-        """Modified forward method to match FocusA's interface"""
+        """Process inputs with adaptive update mechanism."""
         batch, ctx, _ = x.shape
         
         q = self.query_module(x)
@@ -259,6 +206,7 @@ class AdaptiveUpdateAttention(nn.Module):
         return output
 
 class Refiner:
+    """Q-learning based refiner for adaptive attention span."""
     def __init__(self, states, actions, alpha=0.1, gamma=0.9, epsilon=0.1):
         self.states = states
         self.actions = actions
@@ -292,6 +240,7 @@ class Refiner:
         self.set_value(state, action, new_value)
 
 class Predictor(nn.Module):
+    """Neural predictor for span scale estimation."""
     def __init__(self, dims):
         super().__init__()
         self.linear = Linear(in_features=dims, out_features=1)
@@ -302,23 +251,17 @@ class Predictor(nn.Module):
         if global_out.dim() > 2:
             global_out = global_out.mean(dim=1)
         scale = torch.sigmoid(self.linear(global_out))
-        
         return scale
 
-class AdaptiveSpan(nn.Module):
+class AdaptiveSpan(BaseAttention):
+    """Attention with adaptive span size."""
     def __init__(self, dims, head, max_dist, sharpen=True, temp_scale=0.01):
-        super().__init__()
-        self.head = head
-        self.max_dist = max_dist
-        self.dims = dims
-        self.temp_scale = temp_scale
+        super().__init__(dims, head, max_dist)
         self.sharpen = sharpen
+        self.temp_scale = temp_scale
         self.span_scale = nn.Parameter(torch.tensor(1.0))
 
-        self.head_dim = dims // head
-        self.register_buffer("scale", torch.tensor(self.head_dim**-0.25))
-
-    @autocast('cuda', enabled = True)
+    @autocast('cuda', enabled=True)
     def forward(self, query, key, value, max_dist=None, max_span=None, span_scale=None):
         if max_dist is None:
             max_dist = self.max_dist
@@ -346,21 +289,21 @@ class AdaptiveSpan(nn.Module):
         k = k_span.view(*reshape_dims).permute(0, 2, 1, 3)
         v = v_span.view(*reshape_dims).permute(0, 2, 1, 3)
 
+        temperature = (
+            1.0 + self.temp_scale * (1.0 - span_mean)
+            if self.sharpen
+            else 0.5 + self.temp_scale * span_mean
+        )
+        
         with torch.autocast(device_type="cuda", enabled=torch.cuda.is_available()):
-            temperature = (
-                1.0 + self.temp_scale * (1.0 - span_mean)
-                if self.sharpen
-                else 0.5 + self.temp_scale * span_mean
-            )
-            scores = torch.matmul(q, k.transpose(-2, -1))
-            weights = torch.softmax((scores / temperature) * self.scale, dim=-1)
-            out = torch.matmul(weights, v)
-            out = out.permute(0, 2, 1, 3).reshape(batch, eff_span, self.dims)
+            attn_output, weights = calculate_attention(q, k, v, None, temperature, BaseAttention.use_sdpa)
+            out = self._reshape_to_output(attn_output, batch, eff_span)
 
         return out, weights
 
 class IntegratedAttention(nn.Module):
-    def __init__(self, ctx, dims, head, max_dist=512, win_size=256, max_span=384, temp_scale=0.01,):
+    """Combines local adaptive span and global content-dependent attention with RL-based adaptation."""
+    def __init__(self, ctx, dims, head, max_dist=512, win_size=256, max_span=384, temp_scale=0.01):
         super().__init__()
         self.head = head
         self.max_dist = max_dist
@@ -368,7 +311,7 @@ class IntegratedAttention(nn.Module):
         self.dims = dims
         self.max_span = max_span
         self.sliding_window = win_size
-        self.temp_scale = 0.01
+        self.temp_scale = temp_scale
         self.sharpen = True
         self.head_dim = dims // head
         self.batch = None
@@ -376,25 +319,25 @@ class IntegratedAttention(nn.Module):
         self.refiner = Refiner(
             states=10000, actions=10, alpha=0.1, gamma=0.9, epsilon=0.1
         )
+        
         self.span_pred = Predictor(dims=dims)
         self.attn_local = AdaptiveSpan(
-            dims=dims, head=head, max_dist=max_dist, sharpen=True, temp_scale=0.01
+            dims=dims, head=head, max_dist=max_dist, sharpen=True, temp_scale=temp_scale
         )
-
         self.attn_global = AdaptiveUpdateAttention(dims=dims, head=head, max_dist=max_dist)
+        
         self.projection = Linear(in_features=2 * dims, out_features=dims)
-
         self.ln_a = LayerNorm(normalized_shape=dims)
         self.ln_b = LayerNorm(normalized_shape=dims)
 
         mask = torch.empty(max_span, max_span).fill_(float("-inf")).triu_(diagonal=1)
         self.register_buffer("mask", mask, persistent=False)
-
         self.register_buffer("window_mask", None, persistent=False)
         self.register_buffer("threshold", torch.tensor(1e-4), persistent=False)
         self.register_buffer("s_factor", torch.tensor(0.1), persistent=False)
 
     def forward(self, x, xa=None, mask=None, kv_cache=None):
+        """Process input with integrated local and global attention."""
         if mask is None:
             mask = self.mask
             
@@ -402,7 +345,9 @@ class IntegratedAttention(nn.Module):
         globe = self.ln_b(x)
 
         globe_out = self.attn_global(globe, globe, globe)
+        
         freq_scale = self.span_pred(globe_out)
+        
         state = self.extract(local)
 
         action = self.refiner.choose_action(state=state)
@@ -429,16 +374,19 @@ class IntegratedAttention(nn.Module):
             span_scale=span_scale,
             mask=mask,
         )
+        
         with torch.no_grad():
             quality = self.quality(output=local_out)
             next_state = self.extract(local_out)
             self.refiner.update(
                 state=state, action=action, reward=quality, next_state=next_state)
+        
         combined = torch.cat([local_out, globe_out], dim=-1)
         x = self.projection(combined)
         return x
 
     def quality(self, output):
+        """Calculate quality metric for reinforcement learning."""
         with torch.no_grad():
             safe_output = output.clamp(min=1e-10)
             entropy = -(safe_output * torch.log(safe_output)).sum(-1).mean()
@@ -446,6 +394,7 @@ class IntegratedAttention(nn.Module):
             return float(coverage - 0.1 * entropy)
 
     def extract(self, x):
+        """Extract state features for RL agent."""
         with torch.no_grad():
             meadims = x.mean(dim=(0, 1))
             var_state = x.var(dim=(0, 1), unbiased=False)
@@ -454,6 +403,7 @@ class IntegratedAttention(nn.Module):
         return state_id
 
     def discretize(self, state):
+        """Convert continuous state to discrete state ID."""
         bins = np.linspace(-1, 1, num=10)
         state_discrete = np.digitize(state, bins)
         state_hash = hash(tuple(state_discrete))
@@ -461,14 +411,16 @@ class IntegratedAttention(nn.Module):
         return state_id
 
     def action_scale(self, action):
+        """Convert discrete action to continuous scale factor."""
         span_value = action / (self.refiner.actions - 1)
         device = next(self.parameters()).device
         dtype = next(self.parameters()).dtype
         span_scale = torch.tensor([span_value], device=device, dtype=dtype)
         return span_scale
     
-    @autocast('cuda', enabled = True)
+    @autocast('cuda', enabled=True)
     def _focus(self, query, key, value, span_scale, mask):
+        """Iterative attention refinement."""
         max_iterations = 10
         iteration = 0
         prev_attn = torch.zeros_like(input=query)
@@ -491,9 +443,7 @@ class IntegratedAttention(nn.Module):
             v_span = value[:, :eff_span, :]
 
             batch, ctx, dims = q_span.size()
-            d_k = dims // self.head
-            scale_factor = 1 / math.sqrt(d_k)
-
+            
             q = q_span.view(batch, ctx, self.head, -1).transpose(1, 2)
             k = k_span.view(batch, ctx, self.head, -1).transpose(1, 2)
             v = v_span.view(batch, ctx, self.head, -1).transpose(1, 2)
@@ -502,36 +452,22 @@ class IntegratedAttention(nn.Module):
                 temperature = 1.0 + self.temp_scale * (1.0 - span_scale.mean().item())
             else:
                 temperature = 0.5 + self.temp_scale * span_scale.mean().item()
-            attn_scores = (
-                torch.matmul(q, k.transpose(-2, -1)) * scale_factor / temperature
-            )
-            if mask.size(-2) != attn_scores.size(-2) or mask.size(
-                -1
-            ) != attn_scores.size(-1):
-
-                mask_q_len = min(mask.size(-2), attn_scores.size(-2))
-                mask_k_len = min(mask.size(-1), attn_scores.size(-1))
+            
+            if mask is not None and (mask.size(-2) != q.size(-2) or mask.size(-1) != k.size(-2)):
+                mask_q_len = min(mask.size(-2), q.size(-2))
+                mask_k_len = min(mask.size(-1), k.size(-2))
                 resized_mask = torch.ones(
-                    (
-                        batch,
-                        self.head,
-                        attn_scores.size(-2),
-                        attn_scores.size(-1),
-                    ),
+                    (batch, self.head, q.size(-2), k.size(-2)),
                     device=mask.device,
                     dtype=mask.dtype,
                 )
-                resized_mask[:, :, :mask_q_len, :mask_k_len] = mask[
-                    :, :, :mask_q_len, :mask_k_len
-                ]
-                mask = resized_mask
-
-            attn_scores = attn_scores.masked_fill(mask == 0, float("-inf"))
-            attn_weights = torch.softmax(attn_scores, dim=-1)
-            attn_out = torch.matmul(attn_weights, v)
-            attn_out = (
-                attn_out.transpose(1, 2).contiguous().view(batch, ctx, -1)
-            )
+                resized_mask[:, :, :mask_q_len, :mask_k_len] = mask[:, :, :mask_q_len, :mask_k_len]
+                mask_to_use = resized_mask
+            else:
+                mask_to_use = mask
+                
+            attn_output, weights = calculate_attention(q, k, v, mask_to_use, temperature, BaseAttention.use_sdpa)
+            attn_out = attn_output.transpose(1, 2).contiguous().view(batch, ctx, -1)
 
             diff = torch.abs(attn_out - prev_attn).mean()
             dynamic_threshold = threshold + s_factor * diff
@@ -542,10 +478,12 @@ class IntegratedAttention(nn.Module):
             prev_attn = attn_out
             query = query + attn_out
             iteration += 1
+            
         return attn_out, attn_weights
     
-    @autocast('cuda', enabled = True)
+    @autocast('cuda', enabled=True)
     def slide_win(self, x, win_size, span_len, span_scale, mask):
+        """Process input with sliding window attention."""
         batch, ctx, dims = x.size()
         self.batch = batch
         num_windows = (ctx + win_size - 1) // win_size
