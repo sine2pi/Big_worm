@@ -1,3 +1,57 @@
+## IntegratedAttention: Dynamic Multi-Scale Attention with adaptive focus
+
+IntegratedAttention combines adaptive local and global attention mechanisms with reinforcement learning to dynamically adjust attention spans based on content.
+
+### Core Components
+
+IntegratedAttention
+├── Refiner (Q-learning agent)
+├── AdaptiveSpan (Local attention)
+├── AdaptiveUpdateAttention (Global attention)
+├── Span Predictor (Neural frequency estimator)
+└── Window/span adaptation mechanisms
+
+**RL + Heuristics**
+- ✓ Computationally efficient
+- ✓ No higher-order gradients needed
+- ✓ Well-defined discrete states and actions
+- ✓ Stable training dynamics
+
+
+## How It Works
+
+1. **Dual Processing Paths**:
+   - Local path with sliding window attention
+   - Global path with content-dependent update frequencies
+
+2. **Dynamic Span Control**:
+   - Neural predictor generates initial span scale
+   - RL agent selects action to refine span scale
+   - Combined scale determines attention window size
+
+3. **Reinforcement Learning Loop**:
+   - Extract state from input representations
+   - Choose action (span adjustment) via epsilon-greedy
+   - Compute quality metrics as reward signal
+   - Update Q-values for future decisions
+
+4. **Adaptive Window Sliding**:
+   - Dynamically sized windows based on content complexity
+   - Adjustable overlap between windows
+   - Iterative focusing within each window
+
+5. **Integration Mechanism**:
+   - Combine local and global attention outputs
+   - Project to original dimension space
+
+
+- **Content-dependent span adaptation**
+- **Sliding window with variable sizes**
+- **Q-learning for attention optimization**
+- **Quality-driven feedback loop**
+- **Iterative attention refinement**
+
+This mechanism allows the model to dynamically focus on relevant context while maintaining computational efficiency by adapting to the content complexity.
 
 
 ``` python
