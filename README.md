@@ -1,16 +1,18 @@
-## IntegratedAttention: Dynamic Multi-Scale Attention with adaptive focus
+#### IntegratedAttention: Dynamic Multi-Scale Attention with adaptive focus
 
-IntegratedAttention combines adaptive local and global attention mechanisms with reinforcement learning to dynamically adjust attention spans based on content.
+###### Usage: attn = IntegratedAttention(ctx, dims, head)
 
-### Core Components
+##### IntegratedAttention combines adaptive local and global attention mechanisms with reinforcement learning to dynamically adjust attention spans based on content.
 
+##### Core Components
+```
 IntegratedAttention
 ├── Refiner (Q-learning agent)
 ├── AdaptiveSpan (Local attention)
 ├── AdaptiveUpdateAttention (Global attention)
 ├── Span Predictor (Neural frequency estimator)
 └── Window/span adaptation mechanisms
-
+```
 **RL + Heuristics**
 - ✓ Computationally efficient
 - ✓ No higher-order gradients needed
@@ -18,7 +20,7 @@ IntegratedAttention
 - ✓ Stable training dynamics
 
 
-## How It Works
+##### How It Works
 
 1. **Dual Processing Paths**:
    - Local path with sliding window attention
